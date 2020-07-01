@@ -1,0 +1,582 @@
+//without visualization;
+#include<iostream>
+#include<thread>
+#include<vector>
+#include<mutex>
+#include<chrono>
+#include <string>
+#include<ctime>
+#include<map>
+#include <cstdlib> 
+#include <fstream>
+#include<queue>
+#include<deque>
+#include <unordered_map>
+#include <unordered_set>
+#include<atomic>
+using namespace std;
+mutex m0;//mutex for reqs pool
+mutex m1;//mutex for shared resourse buffer 
+mutex m2;//mutex for vector<cart>
+condition_variable cv1;
+bool allDone = 0;
+atomic<int> leaveCnt = 0;
+class passengerReq {
+public:
+	int reqID;
+	int weight;
+	int from;
+	int to;
+	int direction;
+	char symbol;
+	passengerReq(int i, int j, int k, int m) {
+		weight = i;
+		from = j;
+		to = k;
+		reqID = m;
+		if (to > from) {
+			direction = 1;
+		}
+		else if (to < from) {
+			direction = -1;
+		}
+		else {
+			direction = 0;
+			cout << "Invalid request" << endl;
+		}
+	}
+};
+deque<passengerReq*> buffer; // store all request unprocessed requests with the rule of first come, first served
+
+class mycomp1 {
+public:
+	bool operator() (passengerReq* r1, passengerReq* r2) {
+		return r1->to < r2->to;
+	}
+};
+
+class mycomp2 {
+public:
+	bool operator() (passengerReq* r1, passengerReq* r2) {
+		return r1->to > r2->to;
+	}
+};
+
+class mycomp11 {
+public:
+	bool operator() (passengerReq* r1, passengerReq* r2) {
+		return r1->from < r2->from;
+	}
+};
+
+class mycomp22 {
+public:
+	bool operator() (passengerReq* r1, passengerReq* r2) {
+		return r1->from > r2->from;
+	}
+};
+
+class Cart {
+private:
+	
+public:
+	int id;
+	unordered_set<passengerReq*> reqInCart;
+	unordered_set<char> symInCart;
+	deque<char> symbols = { '~','!','@','#','$','%','^','&','*','(',')','-','+','_','=','{','}','<','>','?' };
+	int levels; //record number of levels in current building
+	int capacity; //record the maximum weight of each cart
+	int curWeight = 0; //record the current weight in this cart
+	int direction = 0; //indicate current running states(up 1, down -1, initial state 0)
+	bool state = 0; //indicate current running state(running 1, stoping 0)
+	int curLevel = 0;
+	vector<bool> buttons; //indicate all buttons in this cart
+	vector<int> range = { 0, levels - 1}; //indicate the range of levels that the cart could receive
+	priority_queue<passengerReq*, vector<passengerReq*>, mycomp1> reqs_for_down; // max heap store current down requests
+	priority_queue<passengerReq*, vector<passengerReq*>, mycomp11> pick_up_for_down; // max heap
+	priority_queue<passengerReq*, vector<passengerReq*>, mycomp2> reqs_for_up; // min heap store current up requests
+	priority_queue<passengerReq*, vector<passengerReq*>, mycomp22> pick_up_for_up; // min heap
+	Cart(int l, int cap) {
+		levels = l;
+		capacity = cap;
+		range[1] = l - 1;
+		for (int i = 0; i < l; i++) {
+			buttons.push_back(0);
+		}
+	}
+
+	bool checkState() {
+		if (direction == 1) {
+			if (!reqs_for_down.empty()) {
+				return 0;
+			}
+		}
+		else if (direction == -1) {
+			if (!reqs_for_up.empty()) {
+				return 0;
+			}
+		}
+		return 1;
+	}
+
+	bool couldJoin(passengerReq curReq) {
+		if (curWeight + curReq.weight <= capacity) {
+			return 1;
+		}
+		else {
+			cout << "OverLoad Warning " << endl;
+			return 0;
+		}
+	}
+
+	void updateDirection() {
+		if (!reqs_for_down.empty() && !reqs_for_up.empty()) {
+			cout << "Can't happen go check your code!" << endl;
+		}
+		else if (!reqs_for_down.empty() && reqs_for_up.empty()) {
+			direction = -1;
+		}
+		else if (reqs_for_down.empty() && !reqs_for_up.empty()) {
+			direction = 1;
+		}
+		else {
+			direction = 0; // default state could receive any request
+		}
+		return;
+	}
+
+	void updateState() {
+		if (state == 1) state = 0;
+		else state = 1;
+		return;
+	}
+};
+
+class mycomp3 {
+public:
+	bool operator()(pair<int, Cart*> p1, pair<int, Cart*> p2) {
+		return p1.first > p2.first;
+	}
+};
+
+class Controller {
+public:
+	vector<Cart*> carts;
+	int num; // number of carts
+	Controller() {
+		num = 0;
+	}
+	void addCart(Cart* c) {
+		carts.push_back(c);
+		num++;
+		return;
+	}
+	void cartSelector() {
+		if (buffer.empty()) {
+			return;
+		}
+		else {
+			auto it = buffer.begin();
+			deque<passengerReq*> unfinished;
+			while(it != buffer.end()) {
+				passengerReq* req = *it;
+				priority_queue<pair<int, Cart*>, vector<pair<int, Cart*>>, mycomp3> mypq; // use this min heap select the clostest cart
+				for (int i = 0; i < num; i++) {//polling all cart
+					if (carts[i]->direction == req->direction || carts[i]->direction == 0) {
+						if (req->direction == 0) {
+							cout << "Could not process this request, from and destination are same, cancled, check this request ERROR." << endl;
+							/*int diff = abs(req->from - carts[i]->curLevel);
+							mypq.push({ diff, carts[i] });*/
+							break;
+						}
+						else if (req->direction == 1) {
+							if (req->from >= carts[i]->range[0]) {
+								int diff = abs(req->from - carts[i]->curLevel);
+								mypq.push({ diff, carts[i] });
+							}
+						}
+						else if (req->direction == -1) {
+							if (req->from <= carts[i]->range[1]) {
+								int diff = abs(req->from - carts[i]->curLevel);
+								mypq.push({ diff, carts[i] });
+							}
+						}
+					}
+				}
+				if (mypq.empty()) {//no cart could accept this request return it to shared buffer
+					unfinished.push_back(req);
+				}
+				else {
+					//Cart c = mypq.top().second;
+					bool done = 0;
+					while (!mypq.empty()) {//check the weight limit
+						Cart* curCart = mypq.top().second;
+						if (curCart->couldJoin((*req))) {
+							if (req->direction == 1) {
+								curCart->reqs_for_up.push(req);
+								curCart->pick_up_for_up.push(req);
+								if (curCart->reqs_for_up.size() == 1) {
+									curCart->direction = 1;
+								}
+								curCart->curWeight += req->weight;
+								done = 1;
+								break;
+							}
+							if (req->direction == -1) {
+								curCart->reqs_for_down.push(req);
+								curCart->pick_up_for_down.push(req);
+								if (curCart->reqs_for_down.size() == 1) {
+									curCart->direction = -1;
+								}
+								curCart->curWeight += req->weight;
+								done = 1;
+								break;
+							}
+						}
+						else {
+							mypq.pop();
+						}
+					}
+					if (done == 0) {
+						unfinished.push_back(req);
+					}
+				}
+				it++;
+			}
+			//update request 
+			//buffer.clear();
+			while (!buffer.empty()) {
+				buffer.pop_back();
+			}
+			for (auto i : unfinished) {
+				buffer.push_back(i);
+			}
+		}
+		return;
+	}
+};
+
+deque<passengerReq*> ReqsGenerator(int i, int l) {
+	deque<passengerReq*> ret;
+	for (int m = 0; m < i; m++) {
+		int weight = 50 + rand() % 40;
+		int from = rand() % l;
+		int to;
+		do {
+			to = rand() % l;
+		} while (to == from);
+		passengerReq* curReq = new passengerReq(weight, from, to, m);
+		ret.push_back(curReq);
+	}
+	return ret;
+}
+
+void alloReq(deque<passengerReq*>& reqs) {//allot passengerReqs to shared requests' buffer; run as one thread in main
+	while (!reqs.empty()) {
+		int curSize = reqs.size();
+		int n = rand() % curSize + 1;
+		int timeDiff = rand() % 10;//set a random time difference for different requsets set([0, 10] second)
+		m0.lock();
+		m1.lock();
+		for (int i = 0; i < n; i++) {
+			//if (reqs.empty()) return;
+			passengerReq* curReq = reqs.front();
+			reqs.pop_front();
+			buffer.push_back(curReq);
+			cout << "Emplace passenger request " << (*curReq).reqID << endl;
+		}
+		m0.unlock();
+		m1.unlock();
+		this_thread::sleep_for(chrono::seconds(timeDiff));//for display
+		//this_thread::sleep_for(chrono::microseconds(timeDiff));//for test
+	}
+	return;
+}
+
+void processReq(Controller& control, deque<passengerReq*>& buffer, deque<passengerReq*>& reqs) {//allocate requests in shared resourse buffer periodicity (here we set time )
+	this_thread::sleep_for(chrono::microseconds(100));
+	int timeDiff = 5;
+	while (!buffer.empty() || !reqs.empty()) {
+		m1.lock();
+		m2.lock();
+		control.cartSelector();
+		m1.unlock();
+		m2.unlock();
+		this_thread::sleep_for(chrono::seconds(timeDiff));//we assign requsets every 1 second
+		//this_thread::sleep_for(chrono::microseconds(timeDiff));//for test
+	}
+	cout << "All requests have been processed." << endl;
+	return;
+}
+
+void runCart(Cart* c) {
+	chrono::system_clock::time_point tbegin = chrono::system_clock::now();
+	
+	while (true) {
+		//check cart validity
+		if (c->checkState() == 0) {
+			cerr << "Requests conflict found in this cart." << endl;
+		}
+		//out first;
+		if (!c->reqInCart.empty()) {
+			if (c->direction == 1) {
+				while (c->reqs_for_up.top()->to == c->curLevel) {
+					passengerReq* curReq = c->reqs_for_up.top();
+					c->reqs_for_up.pop();
+					char curSymbol = curReq->symbol;
+					auto p1 = c->reqInCart.find(curReq);
+					auto p2 = c->symInCart.find(curSymbol);
+					if (p1 == c->reqInCart.end()) {
+						cerr << "This request should be here, check it." << endl;
+					}
+					else {
+						c->reqInCart.erase(p1);
+						this_thread::sleep_for(chrono::seconds(1));
+					}
+					if (p2 == c->symInCart.end()) {
+						cerr << "This symbol should in cart, check it." << endl;
+					}
+					else {
+						c->symInCart.erase(p2);
+						c->symbols.push_back(curSymbol);
+						c->curWeight -= curReq->weight;
+						leaveCnt++;
+						cout << "Processed reqs: " << leaveCnt << endl;
+					}
+					//print info
+					cout << "Cart " << c->id << " " << c->curLevel << " " << curSymbol << " one passenger leave. ";
+					for (auto i : c->symInCart) {
+						cout << i << " ";
+					}
+					cout << endl;
+
+					if (c->reqs_for_up.empty()) break;
+				}
+			}
+			else if (c->direction == -1) {
+				int check = c->reqs_for_down.top()->to;
+				bool check2 = c->reqs_for_down.top()->to == c->curLevel;
+				while (c->reqs_for_down.top()->to == c->curLevel) {
+					passengerReq* curReq = c->reqs_for_down.top();
+					c->reqs_for_down.pop();
+					char curSymbol = curReq->symbol;
+					auto p1 = c->reqInCart.find(curReq);
+					auto p2 = c->symInCart.find(curSymbol);
+					if (p1 == c->reqInCart.end()) {
+						cerr << "This request should be here, check it." << endl;
+					}
+					else {
+						c->reqInCart.erase(p1);
+						this_thread::sleep_for(chrono::seconds(1));
+					}
+					if (p2 == c->symInCart.end()) {
+						cerr << "This symbol should in cart, check it." << endl;
+					}
+					else {
+						c->symInCart.erase(p2);
+						c->symbols.push_back(curSymbol);
+						c->curWeight -= curReq->weight;
+						leaveCnt++;
+						cout << "Processed reqs: " << leaveCnt << endl;
+					}
+					//print info
+					cout << "Cart " << c->id << " " << c->curLevel << " " << curSymbol << " one passenger leave. ";
+					for (auto i : c->symInCart) {
+						cout << i << " ";
+					}
+					cout << endl;
+
+					if (c->reqs_for_down.empty()) break;
+				}
+			}
+			else {
+				cerr << "Could not show this state when running" << endl;
+			}
+		}
+		//passenger enter cart
+		if (c->direction == 1) {
+			if (!c->pick_up_for_up.empty()) {
+				while (c->pick_up_for_up.top()->from == c->curLevel) {
+					passengerReq* curReq = c->pick_up_for_up.top();
+					c->pick_up_for_up.pop();
+					char curSymbol = c->symbols.front();
+					c->symbols.pop_front();
+					curReq->symbol = curSymbol;
+					c->reqInCart.emplace(curReq);
+					c->symInCart.emplace(curSymbol);
+					//c->curWeight += curReq->weight;
+					this_thread::sleep_for(chrono::seconds(1));
+					//print info
+					cout << "Cart " << c->id << " " << c->curLevel << " pick up " << curSymbol << ". ";
+					for (auto i : c->symInCart) {
+						cout << i << " ";
+					}
+					cout << endl;
+
+					if (c->pick_up_for_up.empty()) {
+						break;
+					}
+				}
+			}
+			
+		}
+		else if (c->direction == -1) {
+			if (!c->pick_up_for_down.empty()) {
+				while (c->pick_up_for_down.top()->from == c->curLevel) {
+					passengerReq* curReq = c->pick_up_for_down.top();
+					c->pick_up_for_down.pop();
+					char curSymbol = c->symbols.front();
+					c->symbols.pop_front();
+					curReq->symbol = curSymbol;
+					c->reqInCart.emplace(curReq);
+					c->symInCart.emplace(curSymbol);
+					//c->curWeight += curReq->weight;
+					this_thread::sleep_for(chrono::seconds(1));
+					//print info
+					cout << "Cart " << c->id << " " << c->curLevel << " pick up " << curSymbol << ". ";
+					for (auto i : c->symInCart) {
+						cout << i << " ";
+					}
+					cout << endl;
+
+					if (c->pick_up_for_down.empty()) {
+						break;
+					}
+				}
+			}
+		}
+		else {
+			//cerr << "Direction could not be zero when running." << endl;
+		}
+		//go up or go down
+		if (c->direction == 1) {//go up
+			if (!c->reqs_for_up.empty()) {
+				if (!c->pick_up_for_up.empty() && c->curLevel > c->pick_up_for_up.top()->from) {
+					c->curLevel--;
+					c->range[0] = c->curLevel;
+					this_thread::sleep_for(chrono::seconds(2));
+					cout << "Cart " << c->id << " " << c->curLevel << "go to pickup for up. ";
+					for (auto i : c->symInCart) {
+						cout << i << " ";
+					}
+					cout << endl;
+				}
+				else {
+					c->curLevel++;
+					c->range[0] = c->curLevel;
+					this_thread::sleep_for(chrono::seconds(2));
+					cout << "Cart " << c->id << " " << c->curLevel << " go up. ";
+					for (auto i : c->symInCart) {
+						cout << i << " ";
+					}
+					cout << endl;
+				}
+			}
+			else {//all processes are processed
+				c->direction = 0;
+				c->range[0] = 0;
+				c->range[1] = c->levels - 1;
+			}
+		}
+		else if (c->direction == -1) {//go down
+			if (!c->reqs_for_down.empty()) {
+				if (!c->pick_up_for_down.empty() && c->curLevel < c->pick_up_for_down.top()->from) {
+					c->curLevel++;
+					c->range[1] = c->curLevel;
+					this_thread::sleep_for(chrono::seconds(2));
+					cout << "Cart " << c->id <<" "<< c->curLevel << " go to pickup for down. ";
+					for (auto i : c->symInCart) {
+						cout << i << " ";
+					}
+					cout << endl;
+				}
+				else {
+					c->curLevel--;
+					c->range[1] = c->curLevel;
+					this_thread::sleep_for(chrono::seconds(2));
+					cout << "Cart " << c->id << " " << c->curLevel << " go down. ";
+					for (auto i : c->symInCart) {
+						cout << i << " ";
+					}
+					cout << endl;
+				}
+			}
+			else {//all processes are processed
+				c->direction = 0;
+				c->range[0] = 0;
+				c->range[1] = c->levels - 1;
+			}
+		}
+		else if (c->direction == 0) {
+			//cout << "Cart " << c->id << " " << c->curLevel << "stopping";
+		}
+		if (chrono::system_clock::now() - tbegin >= chrono::seconds(5)) {
+			break;
+		}
+	}
+}
+
+void runCarts(vector<Cart*>& carts) {
+	this_thread::sleep_for(chrono::microseconds(200));
+	while (true) {
+		m2.lock();//each loop run 5 seconds
+		int n = carts.size();
+		vector<thread*> T;
+		for (int i = 0; i < n; i++) {
+			thread* curthread = new thread(runCart, carts[i]);
+			T.push_back(curthread);
+		}
+		for (int i = 0; i < n; i++) {
+			T[i]->join();
+		}
+		m2.unlock();
+	}
+}
+
+
+
+int main() {
+	//Construct controller of this building
+	Controller control = Controller();
+	//Initialize carts
+	cout << "Input carts number: ";
+	int cartNum;
+	cin >> cartNum;
+	cout << endl;
+	cout << "Input levels: ";
+	int levels;
+	cin >> levels;
+	cout << endl;
+	int capacity = 1000; //set capacity 1000kg
+	vector<Cart*> carts;
+	for (int i = 0; i < cartNum; i++) {
+		Cart* temp = new Cart(levels, capacity);
+		temp->id = i;
+		//Cart* temp = new Cart(levels, capacity);
+		carts.push_back(temp);
+		control.addCart(temp);
+	}
+	//generate passengerReqs pool
+	cout << "Input request number: ";
+	int reqNum;
+	cin >> reqNum;
+	cout << endl;
+	deque<passengerReq*> reqs = ReqsGenerator(reqNum, levels);
+	/*(*reqs.begin())->from = 4;
+	(*reqs.begin())->to = 7;
+	(*reqs.begin())->direction = 1;*/
+	for (auto i : reqs) {
+		cout << (i)->from << " to " << (i)->to << endl;
+	}
+	
+	//use multithread run the whole system
+	thread t1(alloReq, ref(reqs));
+	thread t2(processReq, ref(control), ref(buffer), ref(reqs));
+	thread t3(runCarts, ref(carts));
+	t1.join();	
+	t2.join();
+	t3.join();
+	carts;
+	buffer;
+	reqs;
+}
